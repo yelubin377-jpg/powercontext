@@ -168,6 +168,7 @@ from powercontext.builtin.runtime._scope_cache import (
 )
 from powercontext.builtin.runtime.decision_model import DecisionModel
 from powercontext.builtin.runtime.errors import InvalidRuntimeRequestError, TopicMemoryProcessingUnavailableError
+from powercontext.builtin.runtime.source_lifecycle import SourceLifecycleApplication
 from powercontext.builtin.runtime.models import (
     ApproveArtifactCandidateRequest,
     CaptureSource,
@@ -846,6 +847,25 @@ class ScopedContextApplication:
             if authorize_scopes is not None:
                 await authorize_scopes((self.scope_id, *scope.context_references))
             return await self._prepare(request, scope)
+
+    async def prepare_incremental(
+        self,
+        request: PrepareContextRequest,
+        base_pack=None,
+        /,
+        *,
+        authorize_scopes: Callable[[tuple[str, ...]], Awaitable[None]] | None = None,
+    ):
+        """Prepare a complete context pack or a prefix delta from a previous pack."""
+        from powercontext.builtin.runtime.context_pack import ContextPack, ContextPackDelta
+
+        prepared = await self.prepare(request, authorize_scopes=authorize_scopes)
+        target = ContextPack.from_content(prepared.content or "")
+        if base_pack is None:
+            return target
+        if not isinstance(base_pack, ContextPack):
+            raise TypeError("base_pack must be a ContextPack")
+        return ContextPackDelta.between(base_pack, target)
 
     async def _prepare(self, request: PrepareContextRequest, scope: ScopeDescriptor, /) -> PreparedContext:
         build, effort = await self._prepare_build(request, scope)
@@ -3100,6 +3120,7 @@ class BuiltinRuntime:
         self._scheduler: AsyncIOScheduler | None = None
         self._scheduler_runtime_key: str | None = None
         self.sources = SourceApplication(self)
+        self.lifecycle = SourceLifecycleApplication(self)
         self.ingestion = RemoteIngestionApplication(self, remote_ingestion)
         self.code = CodeApplication(self, code_service or CodeService(CodeConfig()))
         self.context = ContextApplication(self)

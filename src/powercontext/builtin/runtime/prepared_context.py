@@ -56,6 +56,8 @@ class _PreparedContextEntry:
     citation: dict[str, object]
     content: str
     truncated: bool
+    start: int | None = None
+    end: int | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,7 @@ class PreparedContextBuild:
     origins: tuple[PreparedContextOrigin, ...]
     omissions: PreparedContextOmissions = PreparedContextOmissions()
     code_origins: tuple[CodeEvidenceRef, ...] = ()
+    fragments: tuple["PreparedContextFragment", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -115,6 +118,14 @@ class MemoryEntryAddress:
     memory: ArtifactAddress
     entry_id: str
     entry_version_id: str
+
+
+@dataclass(frozen=True)
+class PreparedContextFragment:
+    address: MemoryEntryAddress
+    start: int
+    end: int
+    text: str
 
 
 PreparedContextOrigin = MemoryCitation | ArtifactRef | MemoryEntryAddress | ArtifactAddress
@@ -235,6 +246,8 @@ class PreparedContextBuilder:
         if sum(len(candidates.hits) for candidates in experience_candidates) > self.experience_candidate_limit:
             raise PreparedContextInvariantError("experience-candidate-limit")
 
+        if request.evidence_selection:
+            return self._build_evidence_selection(request, current_scope_id, memory_candidates)
         content, origins, omissions = self._select_entries(
             request=request,
             current_scope_id=current_scope_id,
@@ -254,6 +267,53 @@ class PreparedContextBuilder:
             context=PreparedContext(status="ready", content=content, content_bytes=content_bytes),
             origins=origins,
             omissions=omissions,
+        )
+
+    def _build_evidence_selection(self, request, current_scope_id, memory_candidates):
+        candidates = [hit for group in memory_candidates for hit in group.hits]
+        query_terms = set(_terms(request.query))
+        pieces = []
+        for group in memory_candidates:
+            for hit in group.hits:
+                if group.memory_ref != hit.memory_ref:
+                    continue
+                address = MemoryEntryAddress(
+                    memory=ArtifactAddress(scope_id=group.scope_id, artifact=hit.memory_ref),
+                    entry_id=hit.entry_id,
+                    entry_version_id=hit.entry_version_id,
+                )
+                import re
+                spans = list(re.finditer(r"[^.!?。！？]+[.!?。！？]?", hit.text)) or [re.match(r".*", hit.text)]
+                for span in spans:
+                    if span is None or span.start() == span.end():
+                        continue
+                    text = hit.text[span.start():span.end()]
+                    score = len(query_terms.intersection(_terms(text)))
+                    pieces.append((score, -span.start(), address, span.start(), span.end(), text))
+        pieces.sort(key=lambda item: (-item[0], item[1], item[2].entry_id))
+        selected = []
+        origins = []
+        fragments = []
+        for _, _, address, start, end, text in pieces:
+            citation = {
+                "scope_id": address.memory.scope_id,
+                "memory_ref": address.memory.artifact.model_dump(mode="json"),
+                "entry_id": address.entry_id,
+                "entry_version_id": address.entry_version_id,
+            }
+            entry = _PreparedContextEntry(address, "memory", citation, text, False, start, end)
+            if _rendered_bytes((*selected, entry)) > request.max_bytes:
+                continue
+            selected.append(entry)
+            origins.append(address)
+            fragments.append(PreparedContextFragment(address, start, end, text))
+        if not selected:
+            return PreparedContextBuild(context=self.empty(), origins=(), fragments=())
+        content = _render(selected)
+        return PreparedContextBuild(
+            context=PreparedContext(status="ready", content=content, content_bytes=len(content.encode("utf-8"))),
+            origins=tuple(origins),
+            fragments=tuple(fragments),
         )
 
     def probe_budget(
@@ -717,6 +777,9 @@ def _render_entry(entry: _PreparedContextEntry) -> dict[str, object]:
     }
     if entry.kind != "memory":
         rendered["kind"] = entry.kind
+    if entry.start is not None:
+        rendered["start"] = entry.start
+        rendered["end"] = entry.end
     return rendered
 
 
@@ -728,3 +791,9 @@ def _truncate_utf8(text: str, byte_budget: int) -> str:
     prefix_budget = byte_budget - len(_ELLIPSIS.encode("utf-8"))
     encoded_prefix = text.encode("utf-8")[:prefix_budget]
     return f"{encoded_prefix.decode('utf-8', errors='ignore')}{_ELLIPSIS}"
+
+
+def _terms(text: str) -> tuple[str, ...]:
+    import re
+
+    return tuple(re.findall(r"[\w]+", text.casefold(), flags=re.UNICODE))

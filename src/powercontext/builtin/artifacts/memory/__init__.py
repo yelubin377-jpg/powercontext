@@ -103,6 +103,7 @@ from powercontext.builtin.artifacts.memory.reranking import (
     MemoryRerankMode,
     MemoryRerankOutput,
 )
+from powercontext.builtin.artifacts.memory.http_reranker import HTTPMemoryReranker
 from powercontext.builtin.artifacts.memory.service import MemoryRememberMode, MemoryService
 
 __all__ = [
@@ -123,6 +124,7 @@ __all__ = [
     "KnownMemoryEntryKind",
     "LLMMemoryCandidatePipeline",
     "LLMMemoryReranker",
+    "HTTPMemoryReranker",
     "Memory",
     "MemoryBackend",
     "MemoryBackendConfigurationError",

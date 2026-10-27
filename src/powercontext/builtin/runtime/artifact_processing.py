@@ -57,7 +57,12 @@ from powercontext.builtin.persistence.supervision import (
     ArtifactProcessingLeaseRepository,
     database_utc_now,
 )
-from powercontext.builtin.persistence.tables import ARTIFACT_PROCESSING_INTENTS_TABLE, ARTIFACT_PROCESSING_LEASES_TABLE
+from powercontext.builtin.persistence.cursors import SourceCursorRepository
+from powercontext.builtin.persistence.tables import (
+    ARTIFACT_PROCESSING_INTENTS_TABLE,
+    ARTIFACT_PROCESSING_LEASES_TABLE,
+    SOURCE_JOURNAL_HEADS_TABLE,
+)
 from powercontext.builtin.runtime.processing_contracts import (
     ArtifactProcessingWorkAssignment,
     ArtifactProcessingWorkerCompletion,
@@ -110,6 +115,7 @@ class ArtifactProcessingBinding:
     max_workers: int = 1
     worker_timeout_seconds: float = 600.0
     automatic_processing_interval: timedelta | None = None
+    automatic_processing_count_threshold: int | None = None
     cron: str | None = None
     timezone: str = "Asia/Shanghai"
     config_prefix: str | None = None
@@ -136,6 +142,11 @@ class ArtifactProcessingBinding:
                 raise ValueError("automatic interval must be positive")  # noqa: TRY003
             if self.cron is not None:
                 raise ValueError("interval and cron cannot both be enabled")  # noqa: TRY003
+        if self.automatic_processing_count_threshold is not None and (
+            type(self.automatic_processing_count_threshold) is not int
+            or self.automatic_processing_count_threshold < 1
+        ):
+            raise ValueError("automatic count threshold must be a positive integer")  # noqa: TRY003
         if self.cron is not None:
             CronTrigger.from_crontab(self.cron, timezone=ZoneInfo(self.timezone))
 
@@ -715,7 +726,11 @@ class ArtifactProcessingSupervisor:
         async with self._database.transaction() as connection:
             await self._leases.require_fence(connection, self._require_current_fence())
             persisted = await self._binding_states.load(connection, binding.binding_name, for_update=True)
-            enabled = binding.automatic_processing_interval is not None or binding.cron is not None
+            enabled = (
+                binding.automatic_processing_interval is not None
+                or binding.cron is not None
+                or binding.automatic_processing_count_threshold is not None
+            )
             if not enabled:
                 if persisted is not None and persisted.scan_in_progress:
                     await self._binding_states.finish_scan(connection, binding.binding_name)
@@ -752,6 +767,9 @@ class ArtifactProcessingSupervisor:
                         and row.last_auto_scan_generation != persisted.scan_generation
                     )
                     eligible = frozenset(candidates)
+                    threshold = binding.automatic_processing_count_threshold
+                    if threshold is not None and candidates:
+                        eligible &= await self._count_eligible(connection, binding.binding_name, candidates, threshold)
                     if candidates and binding.automatic_scope_filter is not None:
                         eligible &= await binding.automatic_scope_filter(connection, candidates)
                     for row in rows:
@@ -781,6 +799,28 @@ class ArtifactProcessingSupervisor:
         state.next_discovery_at = next_discovery_at
         for scope in admitted:
             self._enqueue(state, scope)
+
+    async def _count_eligible(
+        self,
+        connection: AsyncConnection,
+        binding_name: str,
+        scope_ids: tuple[str, ...],
+        threshold: int,
+    ) -> frozenset[str]:
+        """Return scopes with enough journal entries beyond their successful cursor."""
+
+        heads = SOURCE_JOURNAL_HEADS_TABLE
+        rows = (
+            await connection.execute(
+                select(heads.c.scope_id, heads.c.position).where(heads.c.scope_id.in_(scope_ids))
+            )
+        ).all()
+        cursors = await SourceCursorRepository().load_many(connection, scope_ids, binding_name)
+        return frozenset(
+            str(scope)
+            for scope, head in rows
+            if int(head) - (0 if scope not in cursors else cursors[scope].cursor.sequence) >= threshold
+        )
 
     @staticmethod
     def _fresh_capacity(state: _FamilyState) -> int:
@@ -1143,6 +1183,8 @@ def _schedule_deadline(
         next_time = checkpoint + binding.automatic_processing_interval
         return (now if now >= next_time else None), next_time
     if binding.cron is None:
+        if binding.automatic_processing_count_threshold is not None:
+            return now, now
         return None, now
     trigger = CronTrigger.from_crontab(binding.cron, timezone=ZoneInfo(binding.timezone))
     first = trigger.get_next_fire_time(None, (checkpoint + timedelta(microseconds=1)).replace(tzinfo=UTC))
