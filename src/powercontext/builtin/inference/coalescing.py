@@ -78,6 +78,7 @@ class CoalescingEmbeddingModel:
                 pending = self._pending.get(text)
                 if pending is None:
                     future: asyncio.Future[tuple[float, ...]] = loop.create_future()
+                    future.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
                     self._pending[text] = _Pending(future, set())
                     owner.append(text)
                     owner_pending[text] = self._pending[text]
