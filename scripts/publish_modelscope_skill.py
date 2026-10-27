@@ -161,7 +161,7 @@ def build_skill_archive(
 
 def publish_skill(
     *,
-    owner: str,
+    owner: str | None,
     package: SkillPackage,
     archive: Path,
     category: str,
@@ -169,8 +169,8 @@ def publish_skill(
     license_name: str,
     description: str,
     token: str | None,
-) -> str:
-    """Create or update the public Skill and return the created or updated state."""
+) -> tuple[str, str]:
+    """Create or update the public Skill and return the state and the owner."""
 
     try:
         from modelscope_hub.api import HubApi
@@ -178,6 +178,10 @@ def publish_skill(
         from modelscope.hub.api import HubApi
 
     api = HubApi(token=token)
+    if not owner:
+        owner = api.openapi.get_current_username()
+        if not owner:
+            raise SkillPackageError("the ModelScope account handle is unknown; pass --owner")  # noqa: TRY003
     file_id = api.upload_file_to_openapi(archive)
     repo_id = f"{owner}/{package.name}"
     settings = {
@@ -202,12 +206,12 @@ def publish_skill(
     except Exception as error:
         create_error = error
     if create_error is None:
-        return "created"
+        return "created", owner
     try:
         api.openapi.update_skill_settings(owner, package.name, settings)
     except Exception:
         raise create_error from None
-    return "updated"
+    return "updated", owner
 
 
 def resolve_verification_line(arguments: argparse.Namespace) -> str | None:
@@ -225,7 +229,9 @@ def resolve_verification_line(arguments: argparse.Namespace) -> str | None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--owner", required=True, help="the ModelScope account that owns the Skill")
+    parser.add_argument(
+        "--owner", help="the ModelScope account that owns the Skill; resolved from the token when omitted"
+    )
     parser.add_argument("--name", help="the Skill name; defaults to the package directory name")
     parser.add_argument(
         "--package-root", default=str(DEFAULT_PACKAGE_ROOT), help="the directory holding the Skill packages"
@@ -269,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
                 if verification_line:
                     print("The team verification line is appended to the end of SKILL.md.")
                 return 0
-            state = publish_skill(
+            state, owner = publish_skill(
                 owner=arguments.owner,
                 package=package,
                 archive=archive,
@@ -282,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
     except SkillPackageError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    print(f"Skill {state}: https://modelscope.cn/skills/@{arguments.owner}/{package.name}")
+    print(f"Skill {state}: https://modelscope.cn/skills/@{owner}/{package.name}")
     return 0
 
 

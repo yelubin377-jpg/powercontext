@@ -58,13 +58,16 @@ python scripts/publish_modelscope_skill.py \
 # 2. publish (or update, when the Skill already exists)
 export MODELSCOPE_API_TOKEN=<token from https://modelscope.cn/my/myaccesstoken>
 python scripts/publish_modelscope_skill.py \
-  --owner <modelscope-owner> \
   --name powercontext-project-context \
   --verification-line "<team verification line>" \
   --category developer-tools \
   --visibility public \
   --license Apache-2.0
 ```
+
+`--owner` is optional: the account handle is read from the token when it is left out, and
+`modelscope whoami` shows the same handle. Pass `--owner` explicitly to publish under a
+different account.
 
 The script prints the public work link:
 

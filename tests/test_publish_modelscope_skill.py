@@ -136,3 +136,11 @@ def test_the_archive_limit_is_enforced(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(publisher, "MAX_ARCHIVE_BYTES", 1)
     with pytest.raises(publisher.SkillPackageError):
         publisher.build_skill_archive(validated, None, tmp_path / "demo-skill.zip")
+
+
+def test_the_dry_run_needs_neither_an_owner_nor_a_token(capsys: pytest.CaptureFixture) -> None:
+    exit_code = publisher.main(
+        ["--name", "powercontext-project-context", "--package-root", str(PACKAGE_ROOT), "--dry-run"]
+    )
+    assert exit_code == 0
+    assert "ready to publish" in capsys.readouterr().out
