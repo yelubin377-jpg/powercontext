@@ -13,6 +13,14 @@
 # limitations under the License.
 
 from powercontext.sources.adapters import SourceAdapter
+from powercontext.sources.csv_rows import (
+    CSV_ROW_SOURCE_DEFINITION,
+    CSVDocumentInput,
+    CSVRowInput,
+    CSVRowSource,
+    csv_row_source_id,
+    parse_csv_document,
+)
 from powercontext.sources.catalog import SourceCatalog
 from powercontext.sources.connectors import (
     Connector,
@@ -44,6 +52,10 @@ from powercontext.sources.protocols import SourceCatalogBackend, SourceStore
 
 __all__ = [
     "TEXT_EVIDENCE_PROJECTION_KEY",
+    "CSV_ROW_SOURCE_DEFINITION",
+    "CSVDocumentInput",
+    "CSVRowInput",
+    "CSVRowSource",
     "AdapterSourceDefinition",
     "Connector",
     "ConnectorBinding",
@@ -53,6 +65,8 @@ __all__ = [
     "ConnectorRunSession",
     "ConnectorRunStatus",
     "ConnectorSubmissionStatus",
+    "csv_row_source_id",
+    "parse_csv_document",
     "Source",
     "SourceAdapter",
     "SourceCatalog",
