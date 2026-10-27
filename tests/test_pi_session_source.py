@@ -25,6 +25,7 @@ from powercontext.sources import (
     ConnectorBinding,
     SourceDefinitionRegistry,
     SourceRef,
+    manifest_for_definition,
     project_source_for_transport,
 )
 from powercontext.sources.connectors import ConnectorLifecycle
@@ -362,5 +363,59 @@ def test_connector_rejects_a_rewritten_imported_event(tmp_path: Path) -> None:
         write_session(path, records)
         repaired = await lifecycle.run(PiSessionConnector(path, "left"), scope_binding)
         assert repaired.items == ()
+
+    asyncio.run(scenario())
+
+
+def test_a_large_tool_result_stays_complete_in_the_source(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        from powercontext.builtin.persistence.sqlite import SQLiteConfig
+        from powercontext.builtin.runtime import (
+            BuiltinConfig,
+            SubmitSourceObservation,
+            open_builtin_contexts,
+            open_builtin_runtime,
+        )
+        from powercontext.builtin.scope import ScopeDraft
+
+        body = "X" * (512 * 1024)
+        records = [
+            {"type": "message", "id": "root", "parentId": None, "message": {"role": "user", "content": "ask"}},
+            {
+                "type": "message",
+                "id": "big",
+                "parentId": "root",
+                "message": {
+                    "role": "toolResult",
+                    "toolName": "read",
+                    "toolCallId": "call-1",
+                    "content": [{"type": "text", "text": body}],
+                },
+            },
+        ]
+        raw = "\n".join(json.dumps(record) for record in [HEADER, *records]).encode()
+        events = parse_pi_session(PiSessionInput(content=raw))
+        registry = SourceDefinitionRegistry((PI_EVENT_SOURCE_DEFINITION,))
+        observations = [project_source_for_transport(registry, await registry.resolve(event)) for event in events]
+
+        config = BuiltinConfig(database=SQLiteConfig(url=f"sqlite+aiosqlite:///{tmp_path / 'sources.db'}"))
+        async with open_builtin_runtime(config) as runtime:
+            scope = await runtime.scopes.create(
+                ScopeDraft(title="Sources", summary="Evidence", idempotency_key="large")
+            )
+            await runtime.ingestion.register(manifest_for_definition(PI_EVENT_SOURCE_DEFINITION))
+            for observation in observations:
+                await runtime.ingestion.submit(
+                    SubmitSourceObservation(scope_id=scope.scope_id, observation=observation)
+                )
+        async with open_builtin_contexts(config) as contexts:
+            journal = await (await contexts.get(scope.scope_id)).sources.journal.entries()
+            stored = {entry.source_ref.source_id: entry.source for entry in journal}
+
+        source = stored[observations[1].name]
+        content = source.projection(TEXT_EVIDENCE_PROJECTION_KEY)["content"]
+        assert body in content, "the Source truncated the large tool result"
+        assert len(content) == len(body) + len("toolResult: [tool_result read call-1] ")
+        assert len(source.name) <= MAX_SOURCE_ID_LENGTH
 
     asyncio.run(scenario())
