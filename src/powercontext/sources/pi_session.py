@@ -220,7 +220,8 @@ def _session_lines(content: bytes) -> list[str]:
         text = content.decode("utf-8-sig")
     except UnicodeDecodeError as error:
         raise ValueError("Pi session content must be UTF-8 encoded") from error  # noqa: TRY003
-    lines = [line for line in text.splitlines() if line.strip()]
+    # JSONL uses LF (optionally preceded by CR), not Unicode text separators.
+    lines = [line for line in text.split("\n") if line.strip()]
     if not lines:
         raise ValueError("Pi session content must start with a session header")  # noqa: TRY003
     return lines
@@ -250,7 +251,9 @@ def _read_entries(lines: list[str]) -> tuple[_SessionEntry, ...]:
             raise ValueError("Pi session entries must declare a non-empty id")  # noqa: TRY003
         if identifier in seen:
             raise ValueError(f"Pi session entry {identifier!r} is declared more than once")  # noqa: TRY003
-        parent_id = record.get("parentId")
+        if "parentId" not in record:
+            raise ValueError(f"Pi session entry {identifier!r} must declare parentId")  # noqa: TRY003
+        parent_id = record["parentId"]
         if parent_id is not None and (not isinstance(parent_id, str) or not parent_id.strip()):
             raise ValueError(f"Pi session entry {identifier!r} must declare a parent id or null")  # noqa: TRY003
         if parent_id is not None and parent_id not in seen:
@@ -262,12 +265,16 @@ def _read_entries(lines: list[str]) -> tuple[_SessionEntry, ...]:
 
 def _decode_record(line: str) -> dict[str, JsonValue]:
     try:
-        decoded = json.loads(line)
+        decoded = json.loads(line, parse_constant=_reject_json_constant)
     except json.JSONDecodeError as error:
         raise ValueError("Pi session content must contain valid JSON records") from error  # noqa: TRY003
     if not isinstance(decoded, dict):
         raise ValueError("Pi session records must be JSON objects")  # noqa: TRY003, TRY004
     return decoded
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"Pi session contains a non-JSON number: {value}")  # noqa: TRY003
 
 
 def _branch_chain(entries: Sequence[_SessionEntry], leaf_id: str) -> tuple[_SessionEntry, ...]:
@@ -364,7 +371,7 @@ def _visible_blocks(content: object) -> str:
         kind = block.get("type")
         if kind == "text":
             text = block.get("text")
-            if isinstance(text, str) and text:
+            if isinstance(text, str):
                 parts.append(text)
         elif kind == "toolCall":
             parts.append(_tool_call_body(block))
@@ -383,7 +390,7 @@ def _visible_text(content: object) -> str:
         if not isinstance(block, dict) or block.get("type") != "text":
             continue
         text = block.get("text")
-        if isinstance(text, str) and text:
+        if isinstance(text, str):
             parts.append(text)
     return "\n".join(parts)
 
@@ -417,7 +424,11 @@ def _record_digest(record: dict[str, JsonValue]) -> str:
 def _source_identity(session_id: str, event_id: str) -> str:
     """Return one stable identity that only depends on the session and the event."""
 
-    digest = hashlib.sha256(f"{session_id}\x00{event_id}".encode()).hexdigest()[:_IDENTITY_DIGEST_LENGTH]
+    # Preserve existing identities while making embedded delimiters unambiguous.
+    identity = f"{session_id}\x00{event_id}"
+    if "\x00" in session_id or "\x00" in event_id:
+        identity = json.dumps([session_id, event_id], ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(identity.encode()).hexdigest()[:_IDENTITY_DIGEST_LENGTH]
     return f"{session_id[:_IDENTITY_VISIBLE_LENGTH]}:{event_id[:_IDENTITY_VISIBLE_LENGTH]}:{digest}"
 
 

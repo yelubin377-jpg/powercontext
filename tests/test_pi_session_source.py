@@ -150,6 +150,54 @@ def test_events_without_visible_body_are_ignored() -> None:
     assert parse(records) == ()
 
 
+@pytest.mark.parametrize("kind", ["message", "custom_message", "toolResult"])
+def test_visible_text_preserves_empty_blocks_and_unicode_line_separators(kind: str) -> None:
+    blocks = [
+        {"type": "text", "text": ""},
+        {"type": "text", "text": "first\u2028second\u0085third"},
+        {"type": "text", "text": ""},
+        {"type": "image", "data": "ignored"},
+        {"type": "text", "text": "last"},
+        {"type": "text", "text": ""},
+    ]
+    record = {"type": "custom_message", "id": "event", "parentId": None, "content": blocks}
+    role = "custom"
+    prefix = ""
+    if kind != "custom_message":
+        role = "assistant" if kind == "message" else "toolResult"
+        record = {
+            "type": "message",
+            "id": "event",
+            "parentId": None,
+            "message": {"role": role, "content": blocks, "toolName": "read", "toolCallId": "call"},
+        }
+        if kind == "toolResult":
+            prefix = "[tool_result read call] "
+    raw = "\r\n".join(json.dumps(row, ensure_ascii=False) for row in [HEADER, record]).encode()
+    (event,) = parse_pi_session(PiSessionInput(content=raw))
+    assert event.content == f"{role}: {prefix}\nfirst\u2028second\u0085third\n\nlast\n"
+    assert event.record == record
+
+
+def test_missing_parent_field_is_rejected_even_outside_selected_branch() -> None:
+    records = [
+        {"type": "message", "id": "root", "parentId": None, "message": {"role": "user", "content": "ask"}},
+        {"type": "model_change", "id": "invalid"},
+    ]
+    with pytest.raises(ValueError):
+        parse(records, leaf="root")
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_non_json_numbers_are_rejected_in_control_records(constant: str) -> None:
+    raw = (
+        json.dumps(HEADER).encode()
+        + (f'\n{{"type":"model_change","id":"root","parentId":null,"value":{constant}}}').encode()
+    )
+    with pytest.raises(ValueError):
+        parse_pi_session(PiSessionInput(content=raw))
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -222,6 +270,22 @@ def test_projection_keeps_event_identity_and_metadata() -> None:
             "role": "user",
         }
         assert await registry.read(source) == event
+
+    asyncio.run(scenario())
+
+
+def test_long_identities_do_not_collide_at_embedded_delimiters() -> None:
+    async def scenario() -> None:
+        registry = SourceDefinitionRegistry((PI_EVENT_SOURCE_DEFINITION,))
+        event = parse([
+            {"type": "message", "id": "root", "parentId": None, "message": {"role": "user", "content": "ask"}}
+        ])[0]
+        prefix = "s" * MAX_SOURCE_ID_LENGTH
+        first = event.model_copy(update={"session_id": prefix + "\x00", "event_id": "\x00" * 300})
+        second = event.model_copy(update={"session_id": prefix, "event_id": "\x00" * 301})
+        sources = [await registry.resolve(value) for value in (first, second)]
+        assert sources[0].name != sources[1].name
+        assert all(len(source.name) <= MAX_SOURCE_ID_LENGTH for source in sources)
 
     asyncio.run(scenario())
 
@@ -417,5 +481,99 @@ def test_a_large_tool_result_stays_complete_in_the_source(tmp_path: Path) -> Non
         assert body in content, "the Source truncated the large tool result"
         assert len(content) == len(body) + len("toolResult: [tool_result read call-1] ")
         assert len(source.name) <= MAX_SOURCE_ID_LENGTH
+
+    asyncio.run(scenario())
+
+
+def test_runtime_recovers_partial_ingestion_without_advancing_checkpoint(tmp_path: Path) -> None:
+    from powercontext.builtin.persistence.sqlite import SQLiteConfig
+    from powercontext.builtin.runtime import (
+        BuiltinConfig,
+        CommitConnectorCheckpoint,
+        SubmitSourceObservation,
+        open_builtin_contexts,
+        open_builtin_runtime,
+    )
+    from powercontext.builtin.scope import ScopeDraft
+
+    class RuntimeSink:
+        def __init__(self, runtime, *, interrupt: bool) -> None:
+            self.runtime = runtime
+            self.interrupt = interrupt
+            self.registry = SourceDefinitionRegistry((PI_EVENT_SOURCE_DEFINITION,))
+
+        async def submit(self, binding, item_id, definition_name, value):
+            if self.interrupt and item_id == "last":
+                raise RuntimeError("interrupted ingestion")  # noqa: TRY003
+            source = await self.registry.resolve(value)
+            result = await self.runtime.ingestion.submit(
+                SubmitSourceObservation(
+                    scope_id=binding.scope_id, observation=project_source_for_transport(self.registry, source)
+                )
+            )
+            return result.source_ref
+
+    class RuntimeCheckpoints:
+        def __init__(self, runtime) -> None:
+            self.runtime = runtime
+
+        async def load(self, binding):
+            return (await self.runtime.ingestion.checkpoint(binding)).checkpoint
+
+        async def save(self, binding, checkpoint, *, expected):
+            await self.runtime.ingestion.commit(
+                CommitConnectorCheckpoint(binding=binding, checkpoint=checkpoint, expected=expected)
+            )
+
+    async def scenario() -> None:
+        config = BuiltinConfig(database=SQLiteConfig(url=f"sqlite+aiosqlite:///{tmp_path / 'recovery.db'}"))
+        path = tmp_path / "session.jsonl"
+        records = [
+            {"type": "message", "id": "root", "parentId": None, "message": {"role": "user", "content": "ask"}},
+            {
+                "type": "message",
+                "id": "next",
+                "parentId": "root",
+                "message": {"role": "assistant", "content": "first answer"},
+            },
+            {
+                "type": "message",
+                "id": "last",
+                "parentId": "next",
+                "message": {"role": "assistant", "content": "last answer"},
+            },
+        ]
+        write_session(path, records[:1])
+        async with open_builtin_runtime(config) as runtime:
+            scope = await runtime.scopes.create(
+                ScopeDraft(title="Pi", summary="Recovery", idempotency_key="pi-recovery")
+            )
+            scope_binding = binding().model_copy(update={"scope_id": scope.scope_id})
+            await runtime.ingestion.register(manifest_for_definition(PI_EVENT_SOURCE_DEFINITION))
+            lifecycle = ConnectorLifecycle(
+                sink=RuntimeSink(runtime, interrupt=True), checkpoints=RuntimeCheckpoints(runtime)
+            )
+            first = await lifecycle.run(PiSessionConnector(path), scope_binding)
+            write_session(path, records)
+            with pytest.raises(RuntimeError, match="interrupted ingestion"):
+                await lifecycle.run(PiSessionConnector(path), scope_binding)
+
+        async with open_builtin_contexts(config) as contexts:
+            partial = await (await contexts.get(scope.scope_id)).sources.journal.entries()
+            assert len(partial) == 2
+        async with open_builtin_runtime(config) as runtime:
+            lifecycle = ConnectorLifecycle(
+                sink=RuntimeSink(runtime, interrupt=False), checkpoints=RuntimeCheckpoints(runtime)
+            )
+            assert await RuntimeCheckpoints(runtime).load(scope_binding) == first.committed_checkpoint
+            recovered = await lifecycle.run(PiSessionConnector(path), scope_binding)
+            assert recovered.previous_checkpoint == first.committed_checkpoint
+            assert [item.item_id for item in recovered.items] == ["next", "last"]
+            assert (await lifecycle.run(PiSessionConnector(path), scope_binding)).items == ()
+        async with open_builtin_contexts(config) as contexts:
+            persisted = await (await contexts.get(scope.scope_id)).sources.journal.entries()
+            assert len(persisted) == 3
+            assert persisted[:2] == partial
+            assert [entry.source.payload["event_id"] for entry in persisted] == ["root", "next", "last"]
 
     asyncio.run(scenario())
