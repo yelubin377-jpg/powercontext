@@ -13,6 +13,16 @@
 # limitations under the License.
 
 from powercontext.sources.adapters import SourceAdapter
+from powercontext.sources.pdf_pages import (
+    PDF_PAGE_SOURCE_DEFINITION,
+    PDF_PAGE_SOURCE_TYPE,
+    PDFDocumentInput,
+    PDFPageInput,
+    PDFPageSource,
+    parse_pdf_document,
+    pdf_page_source_id,
+    search_pdf_pages,
+)
 from powercontext.sources.catalog import SourceCatalog
 from powercontext.sources.connectors import (
     Connector,
@@ -44,6 +54,14 @@ from powercontext.sources.protocols import SourceCatalogBackend, SourceStore
 
 __all__ = [
     "TEXT_EVIDENCE_PROJECTION_KEY",
+    "PDF_PAGE_SOURCE_DEFINITION",
+    "PDF_PAGE_SOURCE_TYPE",
+    "PDFDocumentInput",
+    "PDFPageInput",
+    "PDFPageSource",
+    "parse_pdf_document",
+    "pdf_page_source_id",
+    "search_pdf_pages",
     "AdapterSourceDefinition",
     "Connector",
     "ConnectorBinding",
