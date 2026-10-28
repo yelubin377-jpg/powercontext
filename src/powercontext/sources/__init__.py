@@ -13,13 +13,15 @@
 # limitations under the License.
 
 from powercontext.sources.adapters import SourceAdapter
-from powercontext.sources.csv_rows import (
-    CSV_ROW_SOURCE_DEFINITION,
-    CSVDocumentInput,
-    CSVRowInput,
-    CSVRowSource,
-    csv_row_source_id,
-    parse_csv_document,
+from powercontext.sources.pdf_pages import (
+    PDF_PAGE_SOURCE_DEFINITION,
+    PDF_PAGE_SOURCE_TYPE,
+    PDFDocumentInput,
+    PDFPageInput,
+    PDFPageSource,
+    parse_pdf_document,
+    pdf_page_source_id,
+    search_pdf_pages,
 )
 from powercontext.sources.catalog import SourceCatalog
 from powercontext.sources.connectors import (
@@ -52,10 +54,14 @@ from powercontext.sources.protocols import SourceCatalogBackend, SourceStore
 
 __all__ = [
     "TEXT_EVIDENCE_PROJECTION_KEY",
-    "CSV_ROW_SOURCE_DEFINITION",
-    "CSVDocumentInput",
-    "CSVRowInput",
-    "CSVRowSource",
+    "PDF_PAGE_SOURCE_DEFINITION",
+    "PDF_PAGE_SOURCE_TYPE",
+    "PDFDocumentInput",
+    "PDFPageInput",
+    "PDFPageSource",
+    "parse_pdf_document",
+    "pdf_page_source_id",
+    "search_pdf_pages",
     "AdapterSourceDefinition",
     "Connector",
     "ConnectorBinding",
@@ -65,8 +71,6 @@ __all__ = [
     "ConnectorRunSession",
     "ConnectorRunStatus",
     "ConnectorSubmissionStatus",
-    "csv_row_source_id",
-    "parse_csv_document",
     "Source",
     "SourceAdapter",
     "SourceCatalog",

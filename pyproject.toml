@@ -21,6 +21,8 @@ readme = "README.md"
 keywords = ['python']
 requires-python = ">=3.11,<4.0"
 dependencies = [
+    # Pinned because per-page extracted text is part of the observable contract.
+    "pypdf==6.19.0",
     "pydantic>=2.10,<3",
     "rfc8785>=0.1.4,<1",
     "typing-extensions>=4.12,<5",
