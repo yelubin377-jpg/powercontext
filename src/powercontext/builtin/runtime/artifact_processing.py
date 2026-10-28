@@ -50,6 +50,7 @@ from powercontext._logging import log_safely
 from powercontext.builtin.persistence.database import AsyncDatabase
 from powercontext.builtin.persistence.errors import ArtifactProcessingLeadershipLostError
 from powercontext.builtin.persistence.processing_intents import ArtifactProcessingIntentRepository
+from powercontext.builtin.persistence.cursors import SourceCursorRepository
 from powercontext.builtin.persistence.supervision import (
     ArtifactProcessingBindingStateRepository,
     ArtifactProcessingFence,
@@ -57,7 +58,6 @@ from powercontext.builtin.persistence.supervision import (
     ArtifactProcessingLeaseRepository,
     database_utc_now,
 )
-from powercontext.builtin.persistence.cursors import SourceCursorRepository
 from powercontext.builtin.persistence.tables import (
     ARTIFACT_PROCESSING_INTENTS_TABLE,
     ARTIFACT_PROCESSING_LEASES_TABLE,
@@ -115,7 +115,7 @@ class ArtifactProcessingBinding:
     max_workers: int = 1
     worker_timeout_seconds: float = 600.0
     automatic_processing_interval: timedelta | None = None
-    automatic_processing_count_threshold: int | None = None
+    automatic_processing_threshold: int | None = None
     cron: str | None = None
     timezone: str = "Asia/Shanghai"
     config_prefix: str | None = None
@@ -142,11 +142,10 @@ class ArtifactProcessingBinding:
                 raise ValueError("automatic interval must be positive")  # noqa: TRY003
             if self.cron is not None:
                 raise ValueError("interval and cron cannot both be enabled")  # noqa: TRY003
-        if self.automatic_processing_count_threshold is not None and (
-            type(self.automatic_processing_count_threshold) is not int
-            or self.automatic_processing_count_threshold < 1
+        if self.automatic_processing_threshold is not None and (
+            type(self.automatic_processing_threshold) is not int or self.automatic_processing_threshold < 1
         ):
-            raise ValueError("automatic count threshold must be a positive integer")  # noqa: TRY003
+            raise ValueError("automatic threshold must be a positive integer")  # noqa: TRY003
         if self.cron is not None:
             CronTrigger.from_crontab(self.cron, timezone=ZoneInfo(self.timezone))
 
@@ -406,6 +405,7 @@ class _FamilyState:
     scan_after: int = 0
     scan_generation: int = 0
     scan_in_progress: bool = False
+    scan_by_threshold: bool = False
     reconcile_after: str | None = None
     reconcile_complete: bool = False
     notification_at_start: int = 0
@@ -720,6 +720,7 @@ class ArtifactProcessingSupervisor:
         scan_after = state.scan_after
         scan_generation = state.scan_generation
         scan_in_progress = False
+        scan_by_threshold = state.scan_by_threshold
         next_schedule_at = state.next_schedule_at
         next_discovery_at = state.next_discovery_at
         admitted: list[str] = []
@@ -729,7 +730,7 @@ class ArtifactProcessingSupervisor:
             enabled = (
                 binding.automatic_processing_interval is not None
                 or binding.cron is not None
-                or binding.automatic_processing_count_threshold is not None
+                or binding.automatic_processing_threshold is not None
             )
             if not enabled:
                 if persisted is not None and persisted.scan_in_progress:
@@ -741,10 +742,27 @@ class ArtifactProcessingSupervisor:
                 if persisted is None or not persisted.scan_in_progress:
                     checkpoint = None if persisted is None else persisted.last_schedule_checkpoint_at
                     due, next_time = _schedule_deadline(binding, checkpoint, now)
-                    next_schedule_at = asyncio.get_running_loop().time() + max(0, (next_time - now).total_seconds())
+                    next_schedule_at = (
+                        None
+                        if binding.automatic_processing_interval is None and binding.cron is None
+                        else asyncio.get_running_loop().time() + max(0, (next_time - now).total_seconds())
+                    )
+                    scan_by_threshold = False
                     if due is not None:
                         persisted = await self._binding_states.start_scan(connection, binding.binding_name, due)
                         scan_after = 0
+                    elif binding.automatic_processing_threshold is not None:
+                        # A count trigger is an immediate admission probe. The
+                        # scope filter below decides whether its pending count
+                        # has reached the configured threshold.
+                        # Preserve the last time-based checkpoint: a count
+                        # admission must not postpone the independent time
+                        # condition.
+                        persisted = await self._binding_states.start_scan(
+                            connection, binding.binding_name, checkpoint_at=checkpoint
+                        )
+                        scan_after = 0
+                        scan_by_threshold = True
                 if persisted is not None and persisted.scan_in_progress:
                     scan_in_progress = True
                     if scan_generation != persisted.scan_generation:
@@ -767,9 +785,13 @@ class ArtifactProcessingSupervisor:
                         and row.last_auto_scan_generation != persisted.scan_generation
                     )
                     eligible = frozenset(candidates)
-                    threshold = binding.automatic_processing_count_threshold
-                    if threshold is not None and candidates:
-                        eligible &= await self._count_eligible(connection, binding.binding_name, candidates, threshold)
+                    if scan_by_threshold and binding.automatic_processing_threshold is not None:
+                        eligible &= await self._count_threshold_scopes(
+                            connection,
+                            candidates,
+                            binding.binding_name,
+                            binding.automatic_processing_threshold,
+                        )
                     if candidates and binding.automatic_scope_filter is not None:
                         eligible &= await binding.automatic_scope_filter(connection, candidates)
                     for row in rows:
@@ -789,38 +811,21 @@ class ArtifactProcessingSupervisor:
                         # Starting a scan established its checkpoint, so a
                         # completed page must not restart the interval here.
                         _, next_time = _schedule_deadline(binding, persisted.last_schedule_checkpoint_at, now)
-                        next_schedule_at = asyncio.get_running_loop().time() + max(0, (next_time - now).total_seconds())
+                        next_schedule_at = (
+                            None
+                            if binding.automatic_processing_interval is None and binding.cron is None
+                            else asyncio.get_running_loop().time() + max(0, (next_time - now).total_seconds())
+                        )
                     else:
                         next_discovery_at = asyncio.get_running_loop().time() + _DISCOVERY_PAGE_DELAY_SECONDS
         state.scan_after = scan_after
         state.scan_generation = scan_generation
         state.scan_in_progress = scan_in_progress
+        state.scan_by_threshold = scan_by_threshold if scan_in_progress else False
         state.next_schedule_at = next_schedule_at
         state.next_discovery_at = next_discovery_at
         for scope in admitted:
             self._enqueue(state, scope)
-
-    async def _count_eligible(
-        self,
-        connection: AsyncConnection,
-        binding_name: str,
-        scope_ids: tuple[str, ...],
-        threshold: int,
-    ) -> frozenset[str]:
-        """Return scopes with enough journal entries beyond their successful cursor."""
-
-        heads = SOURCE_JOURNAL_HEADS_TABLE
-        rows = (
-            await connection.execute(
-                select(heads.c.scope_id, heads.c.position).where(heads.c.scope_id.in_(scope_ids))
-            )
-        ).all()
-        cursors = await SourceCursorRepository().load_many(connection, scope_ids, binding_name)
-        return frozenset(
-            str(scope)
-            for scope, head in rows
-            if int(head) - (0 if scope not in cursors else cursors[scope].cursor.sequence) >= threshold
-        )
 
     @staticmethod
     def _fresh_capacity(state: _FamilyState) -> int:
@@ -1099,6 +1104,7 @@ class ArtifactProcessingSupervisor:
             state.retries.clear()
             state.requested_after = state.scan_after = state.scan_generation = 0
             state.scan_in_progress = False
+            state.scan_by_threshold = False
             state.discovery_pending = True
 
     async def _reap_unconfirmed_exits(self) -> None:
@@ -1114,6 +1120,24 @@ class ArtifactProcessingSupervisor:
         if self._fence is None or self._lease_lost:
             raise ArtifactProcessingLeadershipLostError(self._supervisor_group, self.holder_id, 0)
         return self._fence
+
+    async def _count_threshold_scopes(
+        self, connection: AsyncConnection, scope_ids: Sequence[str], binding_name: str, threshold: int
+    ) -> frozenset[str]:
+        if not scope_ids:
+            return frozenset()
+        heads = SOURCE_JOURNAL_HEADS_TABLE
+        rows = (
+            await connection.execute(select(heads.c.scope_id, heads.c.position).where(heads.c.scope_id.in_(scope_ids)))
+        ).all()
+        cursors = SourceCursorRepository()
+        eligible: set[str] = set()
+        for scope_id, high in rows:
+            cursor = await cursors.load(connection, str(scope_id), binding_name)
+            consumed = 0 if cursor is None else cursor.cursor.sequence
+            if int(high) - consumed >= threshold:
+                eligible.add(str(scope_id))
+        return frozenset(eligible)
 
     def _next_wake_seconds(self) -> float | None:
         if self._fence is None or self._lease_mode == "oceanbase":
@@ -1183,8 +1207,6 @@ def _schedule_deadline(
         next_time = checkpoint + binding.automatic_processing_interval
         return (now if now >= next_time else None), next_time
     if binding.cron is None:
-        if binding.automatic_processing_count_threshold is not None:
-            return now, now
         return None, now
     trigger = CronTrigger.from_crontab(binding.cron, timezone=ZoneInfo(binding.timezone))
     first = trigger.get_next_fire_time(None, (checkpoint + timedelta(microseconds=1)).replace(tzinfo=UTC))

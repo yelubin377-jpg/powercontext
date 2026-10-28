@@ -28,6 +28,7 @@ from pydantic import (
     JsonValue,
     PrivateAttr,
     SecretStr,
+    StrictInt,
     field_validator,
     model_validator,
 )
@@ -137,6 +138,7 @@ class RuntimeConfig(BaseModel):
 
     scope_cache_size: int = Field(default=DEFAULT_SCOPE_CACHE_SIZE, ge=1)
     source_window_limit: int = Field(default=100, ge=1)
+    memory_source_count_threshold: StrictInt | None = Field(default=None, gt=0)
     context_assembly_max_entries: int = Field(default=8, ge=1)
     memory_extraction_profile: MemoryExtractionProfile = MemoryExtractionProfile.CODING
     memory_rerank_enabled: bool = False
@@ -211,6 +213,7 @@ class RuntimeConfig(BaseModel):
     topic_memory_schedule_seconds: float | None = Field(default=None, gt=0)
     topic_memory_source_count_threshold: int | None = None
     topic_memory_source_window_limit: int = Field(default=10, ge=1)
+    topic_memory_source_count_threshold: StrictInt | None = Field(default=None, gt=0)
     topic_memory_history_max_candidates: int = Field(default=20, ge=1, le=MAX_TOPIC_MEMORY_SEARCH_LIMIT)
     topic_memory_history_rrf_threshold: int = Field(default=70, ge=0, le=100)
     topic_memory_history_min_candidates: int = Field(default=5, ge=1, le=MAX_TOPIC_MEMORY_SEARCH_LIMIT)
