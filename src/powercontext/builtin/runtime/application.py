@@ -863,7 +863,9 @@ class ScopedContextApplication:
         if base_pack is None:
             return target
         if not isinstance(base_pack, ContextPack):
-            raise TypeError("base_pack must be a ContextPack")
+            from powercontext.builtin.runtime.context_pack import ContextPackError
+
+            raise ContextPackError("base_pack must be a ContextPack")
         return ContextPackDelta.between(base_pack, target)
 
     async def _prepare(self, request: PrepareContextRequest, scope: ScopeDescriptor, /) -> PreparedContext:

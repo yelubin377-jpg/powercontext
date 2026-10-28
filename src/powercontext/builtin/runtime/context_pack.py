@@ -44,6 +44,8 @@ def _decode(value: object) -> bytes:
 
 
 def _load_json(data: bytes) -> object:
+    if not isinstance(data, bytes):
+        raise ContextPackError("wire payload must be bytes")
     try:
         return json.loads(data.decode("utf-8"), parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
@@ -65,10 +67,30 @@ def _check_digest(value: object, field: str) -> str:
 def _check_items(value: object, field: str) -> tuple[bytes, ...]:
     if not isinstance(value, list):
         raise ContextPackError(f"{field} must be an array")
-    try:
-        return tuple(_decode(item) for item in value)
-    except ContextPackError:
-        raise
+    return tuple(_decode(item) for item in value)
+
+
+def _normalize_items(items: tuple[bytes, ...] | list[bytes], field: str = "items") -> tuple[bytes, ...]:
+    if not isinstance(items, (tuple, list)):
+        raise ContextPackError(f"{field} must be a tuple or list of bytes")
+    normalized: list[bytes] = []
+    for item in items:
+        if not isinstance(item, bytes):
+            raise ContextPackError(f"{field} must contain bytes")
+        normalized.append(item)
+    return tuple(normalized)
+
+
+def _validate_pack(pack: ContextPack) -> None:
+    """Validate the in-memory integrity fields before using a pack as a base."""
+
+    if not isinstance(pack, ContextPack):
+        raise ContextPackError("base must be a ContextPack")
+    items = _normalize_items(pack.items)
+    if pack.digest != _digest(items):
+        raise ContextPackError("pack digest does not match items")
+    if type(pack.byte_count) is not int or pack.byte_count != len(pack.to_bytes()):
+        raise ContextPackError("pack byte_count does not match wire length")
 
 
 def _wire_byte_count(unsigned: dict[str, Any], field: str, value: int | None = None) -> int:
@@ -94,10 +116,7 @@ class ContextPack:
 
     @classmethod
     def build(cls, items: tuple[bytes, ...] | list[bytes]) -> ContextPack:
-        try:
-            normalized = tuple(bytes(item) for item in items)
-        except (TypeError, ValueError) as error:
-            raise ContextPackError("items must contain bytes") from error
+        normalized = _normalize_items(items)
         digest = _digest(normalized)
         unsigned = {"schema": _PACK_SCHEMA, "items": [_encode(item) for item in normalized], "digest": digest}
         return cls(normalized, digest, _wire_byte_count(unsigned, "byte_count"))
@@ -169,6 +188,8 @@ class ContextPackDelta:
 
     @classmethod
     def between(cls, base: ContextPack, target: ContextPack) -> ContextPackDelta:
+        _validate_pack(base)
+        _validate_pack(target)
         prefix = 0
         for left, right in zip(base.items, target.items, strict=False):
             if left != right:
@@ -185,12 +206,13 @@ class ContextPackDelta:
             raise ContextPackError("prefix_items must be a non-negative integer")
         _check_digest(self.base_digest, "base_digest")
         _check_digest(self.target_digest, "target_digest")
+        appended = _normalize_items(self.appended, "appended")
         payload = {
             "schema": _DELTA_SCHEMA,
             "base_digest": self.base_digest,
             "target_digest": self.target_digest,
             "prefix_items": self.prefix_items,
-            "appended": [_encode(item) for item in self.appended],
+            "appended": [_encode(item) for item in appended],
         }
         return _canonical(payload)
 
@@ -213,6 +235,9 @@ class ContextPackDelta:
 def apply_context_pack_delta(base: ContextPack, delta: ContextPackDelta) -> ContextPack:
     """Validate a delta against a base pack and reconstruct its target."""
 
+    _validate_pack(base)
+    if not isinstance(delta, ContextPackDelta):
+        raise ContextPackError("delta must be a ContextPackDelta")
     if delta.base_digest != base.digest:
         raise ContextPackError("delta base digest does not match base pack")
     if type(delta.prefix_items) is not int or delta.prefix_items < 0 or delta.prefix_items > len(base.items):

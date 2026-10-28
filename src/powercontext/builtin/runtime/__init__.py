@@ -59,6 +59,7 @@ from powercontext.builtin.runtime.application import (
     ScheduledExperienceProcessor,
     ScheduledSourceProcessor,
     ScopedExperienceApplication,
+    ScopedContextApplication,
     ScopedExternalSkillApplication,
     ScopedHandoffApplication,
     ScopedMemoryApplication,
