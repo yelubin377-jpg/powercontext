@@ -7964,6 +7964,11 @@ OPENAPI_SCHEMA: dict[str, JsonValue] = {
                         "preparation.",
                         "default": False,
                     },
+                    "evidence_selection": {
+                        "type": "boolean",
+                        "description": "Select literal Memory fragments using the query within the byte budget.",
+                        "default": False,
+                    },
                     "assembly": {"$ref": "#/components/schemas/ContextAssembly"},
                 },
                 "additionalProperties": False,
