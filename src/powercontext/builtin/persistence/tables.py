@@ -1090,6 +1090,27 @@ RECEIPT_MIGRATION_REVIEW_TABLE = Table(
     Column("reason", String(64), nullable=False),
 )
 
+SOURCE_LIFECYCLE_TABLE = Table(
+    "pc_source_lifecycle",
+    SHARED_METADATA,
+    Column("scope_id", identity_string(MAX_SCOPE_ID_LENGTH), primary_key=True),
+    Column("node_id", identity_string(256), primary_key=True),
+    Column("family", identity_string(16), nullable=False),
+    Column("reference", _canonical_payload_type(), nullable=False),
+    Column("parents", _canonical_payload_type(), nullable=False),
+    Column("policy", identity_string(8), nullable=False),
+    Column("available", Boolean, nullable=False),
+    Column("revision", Integer, nullable=False),
+    Column("sequence", Integer),
+    Column("event_available", Boolean),
+    Column("event_revision", Integer),
+    Column("event_reason", _entry_text_type()),
+    ForeignKeyConstraint(("scope_id",), ("pc_scopes.scope_id",), ondelete="CASCADE"),
+    CheckConstraint("policy IN ('all', 'any')", name="ck_pc_source_lifecycle_policy"),
+    CheckConstraint("revision > 0", name="ck_pc_source_lifecycle_revision_positive"),
+    CheckConstraint("sequence IS NULL OR sequence > 0", name="ck_pc_source_lifecycle_sequence_positive"),
+)
+
 # The recurrence ledger is append-only: every correction is a new row, and the
 # only write path is the existing task-outcome incubation window.
 RECURRENCE_MATCH_TABLE = Table(
@@ -1187,5 +1208,5 @@ BUILTIN_TABLES = (
     + MEMORY_TABLES
     + STATISTICS_TABLES
     + RECURRENCE_TABLES
-    + (ARTIFACT_TAGS_TABLE, DREAM_RUNS_TABLE, RECEIPT_MIGRATION_REVIEW_TABLE)
+    + (ARTIFACT_TAGS_TABLE, DREAM_RUNS_TABLE, RECEIPT_MIGRATION_REVIEW_TABLE, SOURCE_LIFECYCLE_TABLE)
 )

@@ -852,7 +852,6 @@ class ScopedContextApplication:
         self,
         request: PrepareContextRequest,
         base_pack=None,
-        /,
         *,
         authorize_scopes: Callable[[tuple[str, ...]], Awaitable[None]] | None = None,
     ):
@@ -1389,7 +1388,11 @@ class ScopedContextApplication:
                             admission=admission,
                             query_embedding=reuse,
                         )
-                        memory_hits = result.hits
+                        lifecycle = self._runtime.lifecycle
+                        memory_hits = tuple(
+                            hit for hit in result.hits
+                            if await lifecycle.allows_memory(scope_id, hit.memory_ref, hit.entry_id)
+                        )
                         search_mode = result.mode
                         memory_admission = (
                             None if result.admission is None else replace(result.admission, scope_id=scope_id)
@@ -2467,6 +2470,13 @@ class ScopedMemoryApplication:
                             raise RevisionConflictError(current, latest) from error
                         attempt += 1
                         continue
+                    lifecycle = self._runtime.lifecycle
+                    result = result.model_copy(update={
+                        "hits": tuple(
+                            hit for hit in result.hits
+                            if await lifecycle.allows_memory(self.scope_id, hit.memory_ref, hit.entry_id)
+                        )
+                    })
                     if span is not None:
                         span.set_attributes({
                             _MEMORY_SEARCH_MEMORY_PRESENT: True,
@@ -2703,6 +2713,10 @@ class ScopedTopicMemoryApplication:
                         "unit": "topic-memory",
                     },
                 )
+        lifecycle = self._runtime.lifecycle
+        if result.hits:
+            allowed = [hit for hit in result.hits if await lifecycle.allows_topic(self.scope_id, hit.artifact_ref)]
+            result = result.model_copy(update={"hits": tuple(allowed)})
         return result
 
     async def _search_with_embedding(
