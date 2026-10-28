@@ -64,10 +64,16 @@ class HTTPMemoryReranker:
                 rank, score = item["rank"], item["score"]
                 if type(rank) is not int or rank not in expected or rank in seen:
                     raise ValueError("invalid reranker rank coverage")
-                if not isinstance(score, (int, float)) or isinstance(score, bool) or not math.isfinite(float(score)):
+                if not isinstance(score, (int, float)) or isinstance(score, bool):
+                    raise ValueError("invalid reranker score")
+                try:
+                    normalized_score = float(score)
+                except (OverflowError, ValueError) as error:
+                    raise ValueError("invalid reranker score") from error
+                if not math.isfinite(normalized_score):
                     raise ValueError("invalid reranker score")
                 seen.add(rank)
-                scores[rank] = float(score)
+                scores[rank] = normalized_score
             if seen != expected:
                 raise ValueError("incomplete reranker rank coverage")
         selected = tuple(sorted(scores, key=lambda rank: (-scores[rank], rank))[:limit])
